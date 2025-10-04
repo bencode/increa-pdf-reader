@@ -3,31 +3,44 @@
 PDF Reader MCP Server - An MCP server for reading and searching PDF files using FastMCP
 """
 
-import asyncio
 import json
 import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
-try:
-    import fitz  # PyMuPDF
-except ImportError:
-    raise ImportError("PyMuPDF is required. Install with: pip install PyMuPDF")
-
+import fitz  # PyMuPDF
 from mcp.server.fastmcp import FastMCP
 
 # Initialize FastMCP server
 mcp = FastMCP("pdf-reader")
 
 # Global document store
-documents: Dict[str, fitz.Document] = {}
+documents: dict[str, fitz.Document] = {}
 
 
 def generate_doc_id() -> str:
-    """Generate a unique document ID"""
     return str(uuid.uuid4())
+
+
+def _validate_doc_id(doc_id: str) -> fitz.Document:
+    """Validate and return document by ID"""
+    if doc_id not in documents:
+        raise ValueError("Invalid or missing doc_id")
+    return documents[doc_id]
+
+
+def _validate_page_range(doc: fitz.Document, page: int) -> None:
+    """Validate page number is within document range"""
+    if page < 1 or page > doc.page_count:
+        raise ValueError(f"Page number out of range. Valid range: 1-{doc.page_count}")
+
+
+def _is_allowed_path(path: str) -> bool:
+    """Check if path is allowed for security"""
+    allowed_paths = ["/Users", "/tmp", os.getcwd(), tempfile.gettempdir()]
+    return any(Path(path).resolve().is_relative_to(Path(allowed_path).resolve())
+               for allowed_path in allowed_paths)
 
 
 @mcp.tool()
@@ -37,9 +50,7 @@ def open_pdf(path: str) -> str:
     Args:
         path: Path to the PDF file
     """
-    # Security check - only allow certain paths
-    allowed_paths = ["/Users", "/tmp", os.getcwd(), tempfile.gettempdir()]
-    if not any(Path(path).resolve().is_relative_to(Path(allowed_path).resolve()) for allowed_path in allowed_paths):
+    if not _is_allowed_path(path):
         raise ValueError(f"Access denied for path: {path}")
 
     try:
@@ -48,7 +59,7 @@ def open_pdf(path: str) -> str:
         documents[doc_id] = doc
         return doc_id
     except Exception as e:
-        raise RuntimeError(f"Failed to open PDF: {str(e)}")
+        raise RuntimeError(f"Failed to open PDF: {e}")
 
 
 @mcp.tool()
@@ -58,10 +69,7 @@ def page_count(doc_id: str) -> int:
     Args:
         doc_id: Document ID returned by open_pdf
     """
-    if doc_id not in documents:
-        raise ValueError("Invalid or missing doc_id")
-
-    doc = documents[doc_id]
+    doc = _validate_doc_id(doc_id)
     return doc.page_count
 
 
@@ -73,19 +81,11 @@ def extract_text(doc_id: str, page: int) -> str:
         doc_id: Document ID returned by open_pdf
         page: Page number (1-based)
     """
-    if doc_id not in documents:
-        raise ValueError("Invalid or missing doc_id")
+    doc = _validate_doc_id(doc_id)
+    _validate_page_range(doc, page)
 
-    doc = documents[doc_id]
-
-    if page < 1 or page > doc.page_count:
-        raise ValueError(f"Page number out of range. Valid range: 1-{doc.page_count}")
-
-    try:
-        page_obj = doc[page - 1]  # Convert to 0-based
-        return page_obj.get_text()
-    except Exception as e:
-        raise RuntimeError(f"Failed to extract text: {str(e)}")
+    page_obj = doc[page - 1]
+    return page_obj.get_text()
 
 
 @mcp.tool()
@@ -97,25 +97,16 @@ def render_page_png(doc_id: str, page: int, dpi: int = 144) -> str:
         page: Page number (1-based)
         dpi: Resolution in DPI (default: 144)
     """
-    if doc_id not in documents:
-        raise ValueError("Invalid or missing doc_id")
+    doc = _validate_doc_id(doc_id)
+    _validate_page_range(doc, page)
 
-    doc = documents[doc_id]
+    page_obj = doc[page - 1]
+    pix = page_obj.get_pixmap(dpi=dpi)
 
-    if page < 1 or page > doc.page_count:
-        raise ValueError(f"Page number out of range. Valid range: 1-{doc.page_count}")
-
-    try:
-        page_obj = doc[page - 1]  # Convert to 0-based
-        pix = page_obj.get_pixmap(dpi=dpi)
-
-        # Save to temporary file
-        temp_dir = tempfile.gettempdir()
-        temp_file = os.path.join(temp_dir, f"pdf_page_{page}_{uuid.uuid4().hex[:8]}.png")
-        pix.save(temp_file)
-        return temp_file
-    except Exception as e:
-        raise RuntimeError(f"Failed to render page: {str(e)}")
+    temp_file = os.path.join(tempfile.gettempdir(),
+                           f"pdf_page_{page}_{uuid.uuid4().hex[:8]}.png")
+    pix.save(temp_file)
+    return temp_file
 
 
 @mcp.tool()
@@ -127,44 +118,37 @@ def search_text(doc_id: str, query: str, max_hits: int = 20) -> str:
         query: Text to search for
         max_hits: Maximum number of results (default: 20)
     """
-    if doc_id not in documents:
-        raise ValueError("Invalid or missing doc_id")
-
     if not query:
         raise ValueError("Missing required parameter: query")
 
-    doc = documents[doc_id]
+    doc = _validate_doc_id(doc_id)
     results = []
 
-    try:
-        for page_num in range(doc.page_count):
-            page = doc[page_num]
-            text_instances = page.search_for(query)
+    for page_num in range(doc.page_count):
+        page = doc[page_num]
+        text_instances = page.search_for(query)
 
-            for inst in text_instances:
-                # Extract surrounding text
-                rect = inst
-                surrounding_rect = fitz.Rect(
-                    rect.x0 - 50, rect.y0 - 20,
-                    rect.x1 + 50, rect.y1 + 20
-                )
-                surrounding_text = page.get_text("text", clip=surrounding_rect)
+        for inst in text_instances:
+            # Extract surrounding text
+            surrounding_rect = fitz.Rect(
+                inst.x0 - 50, inst.y0 - 20,
+                inst.x1 + 50, inst.y1 + 20
+            )
+            surrounding_text = page.get_text("text", clip=surrounding_rect)
 
-                results.append({
-                    "page": page_num + 1,  # Convert to 1-based
-                    "text": surrounding_text.strip(),
-                    "bbox": [rect.x0, rect.y0, rect.x1, rect.y1]
-                })
-
-                if len(results) >= max_hits:
-                    break
+            results.append({
+                "page": page_num + 1,
+                "text": surrounding_text.strip(),
+                "bbox": [inst.x0, inst.y0, inst.x1, inst.y1]
+            })
 
             if len(results) >= max_hits:
                 break
 
-        return json.dumps(results, indent=2)
-    except Exception as e:
-        raise RuntimeError(f"Failed to search text: {str(e)}")
+        if len(results) >= max_hits:
+            break
+
+    return json.dumps(results, indent=2)
 
 
 @mcp.tool()
@@ -174,18 +158,11 @@ def close_pdf(doc_id: str) -> str:
     Args:
         doc_id: Document ID returned by open_pdf
     """
-    if doc_id not in documents:
-        raise ValueError("Invalid or missing doc_id")
-
-    try:
-        doc = documents[doc_id]
-        doc.close()
-        del documents[doc_id]
-        return "Document closed successfully"
-    except Exception as e:
-        raise RuntimeError(f"Failed to close document: {str(e)}")
+    doc = _validate_doc_id(doc_id)
+    doc.close()
+    del documents[doc_id]
+    return "Document closed successfully"
 
 
 if __name__ == "__main__":
-    # Run the server
     mcp.run()
