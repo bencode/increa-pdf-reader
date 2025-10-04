@@ -168,5 +168,10 @@ def close_pdf(doc_id: str) -> str:
     return "Document closed successfully"
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the MCP server"""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
