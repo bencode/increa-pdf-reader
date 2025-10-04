@@ -4,7 +4,6 @@ PDF Reader MCP Server - An MCP server for reading and searching PDF files using 
 """
 
 import json
-import os
 import tempfile
 import uuid
 from pathlib import Path
@@ -38,9 +37,10 @@ def _validate_page_range(doc: fitz.Document, page: int) -> None:
 
 def _is_allowed_path(path: str) -> bool:
     """Check if path is allowed for security"""
-    allowed_paths = ["/Users", "/tmp", os.getcwd(), tempfile.gettempdir()]
-    return any(Path(path).resolve().is_relative_to(Path(allowed_path).resolve())
-               for allowed_path in allowed_paths)
+    allowed_paths = ["/Users", "/tmp", Path.cwd(), tempfile.gettempdir()]
+    return any(
+        Path(path).resolve().is_relative_to(Path(allowed_path).resolve()) for allowed_path in allowed_paths
+    )
 
 
 @mcp.tool()
@@ -55,11 +55,12 @@ def open_pdf(path: str) -> str:
 
     try:
         doc = fitz.open(path)
-        doc_id = generate_doc_id()
-        documents[doc_id] = doc
-        return doc_id
-    except Exception as e:
-        raise RuntimeError(f"Failed to open PDF: {e}")
+    except (FileNotFoundError, fitz.FileDataError, fitz.EmptyFileError) as e:
+        raise RuntimeError(f"Failed to open PDF: {e}") from None
+
+    doc_id = generate_doc_id()
+    documents[doc_id] = doc
+    return doc_id
 
 
 @mcp.tool()
@@ -103,8 +104,7 @@ def render_page_png(doc_id: str, page: int, dpi: int = 144) -> str:
     page_obj = doc[page - 1]
     pix = page_obj.get_pixmap(dpi=dpi)
 
-    temp_file = os.path.join(tempfile.gettempdir(),
-                           f"pdf_page_{page}_{uuid.uuid4().hex[:8]}.png")
+    temp_file = Path(tempfile.gettempdir()) / f"pdf_page_{page}_{uuid.uuid4().hex[:8]}.png"
     pix.save(temp_file)
     return temp_file
 
@@ -131,16 +131,20 @@ def search_text(doc_id: str, query: str, max_hits: int = 20) -> str:
         for inst in text_instances:
             # Extract surrounding text
             surrounding_rect = fitz.Rect(
-                inst.x0 - 50, inst.y0 - 20,
-                inst.x1 + 50, inst.y1 + 20
+                inst.x0 - 50,
+                inst.y0 - 20,
+                inst.x1 + 50,
+                inst.y1 + 20,
             )
             surrounding_text = page.get_text("text", clip=surrounding_rect)
 
-            results.append({
-                "page": page_num + 1,
-                "text": surrounding_text.strip(),
-                "bbox": [inst.x0, inst.y0, inst.x1, inst.y1]
-            })
+            results.append(
+                {
+                    "page": page_num + 1,
+                    "text": surrounding_text.strip(),
+                    "bbox": [inst.x0, inst.y0, inst.x1, inst.y1],
+                },
+            )
 
             if len(results) >= max_hits:
                 break
